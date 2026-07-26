@@ -1,0 +1,5 @@
+plan.md
+venv
+__pycache__/
+*.pyc
+.vscode/

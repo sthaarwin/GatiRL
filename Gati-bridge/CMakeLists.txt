@@ -1,0 +1,108 @@
+cmake_minimum_required(VERSION 3.21)
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if ("${CMAKE_SYSTEM_NAME}" STREQUAL "iOS" OR IOS)
+    set(CMAKE_OSX_ARCHITECTURES "arm64")
+else()
+    set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64")
+endif()
+set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+
+if (WIN32)
+    set(_include_paths "")
+    set(_msvc_lib_dir "")
+    set(_windows_sdk_lib_dir "")
+
+    if (DEFINED ENV{INCLUDE})
+        set(_include_paths "$ENV{INCLUDE}")
+    endif()
+
+    set(_msvc_include_root "")
+    if (DEFINED ENV{VCToolsInstallDir})
+        set(_msvc_include_root "$ENV{VCToolsInstallDir}/include")
+        set(_msvc_lib_dir "$ENV{VCToolsInstallDir}/lib/x64")
+    elseif (EXISTS "C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC")
+        file(GLOB _msvc_versions LIST_DIRECTORIES true "C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/*")
+        list(SORT _msvc_versions)
+        list(REVERSE _msvc_versions)
+        if (_msvc_versions)
+            list(GET _msvc_versions 0 _msvc_version_dir)
+            set(_msvc_include_root "${_msvc_version_dir}/include")
+            set(_msvc_lib_dir "${_msvc_version_dir}/lib/x64")
+        endif()
+    endif()
+
+    if (EXISTS "${_msvc_include_root}/algorithm")
+        if (_include_paths STREQUAL "")
+            set(_include_paths "${_msvc_include_root}")
+        else()
+            set(_include_paths "${_msvc_include_root};${_include_paths}")
+        endif()
+    endif()
+
+    set(_windows_sdk_root "")
+    if (DEFINED ENV{WindowsSdkDir})
+        set(_windows_sdk_root "$ENV{WindowsSdkDir}")
+    elseif (EXISTS "C:/Program Files (x86)/Windows Kits/10/Include")
+        set(_windows_sdk_root "C:/Program Files (x86)/Windows Kits/10")
+    endif()
+
+    if (_windows_sdk_root)
+        file(GLOB _windows_sdk_versions LIST_DIRECTORIES true "${_windows_sdk_root}/Include/*")
+        list(SORT _windows_sdk_versions)
+        list(REVERSE _windows_sdk_versions)
+        if (_windows_sdk_versions)
+            list(GET _windows_sdk_versions 0 _windows_sdk_version_dir)
+            if (EXISTS "${_windows_sdk_version_dir}/um/winsock2.h")
+                foreach(_sdk_dir um shared ucrt)
+                    if (_include_paths STREQUAL "")
+                        set(_include_paths "${_windows_sdk_version_dir}/${_sdk_dir}")
+                    else()
+                        set(_include_paths "${_windows_sdk_version_dir}/${_sdk_dir};${_include_paths}")
+                    endif()
+                endforeach()
+
+                get_filename_component(_windows_sdk_version_name "${_windows_sdk_version_dir}" NAME)
+                set(_windows_sdk_lib_dir
+                    "${_windows_sdk_root}/Lib/${_windows_sdk_version_name}/um/x64"
+                    "${_windows_sdk_root}/Lib/${_windows_sdk_version_name}/ucrt/x64"
+                )
+            endif()
+        endif()
+    endif()
+
+    if (NOT _include_paths STREQUAL "")
+        set(ENV{INCLUDE} "${_include_paths}")
+
+        string(REPLACE ";" ";/I" _include_flags "${_include_paths}")
+        add_compile_options(/I${_include_flags})
+    endif()
+endif()
+
+project(Gati-bridge VERSION 1.0.0)
+
+file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS src/*.cpp)
+
+add_library(${PROJECT_NAME} SHARED ${SOURCES})
+set_target_properties(${PROJECT_NAME} PROPERTIES DISABLE_PRECOMPILE_HEADERS ON)
+if (WIN32 AND _windows_sdk_lib_dir)
+    target_link_directories(${PROJECT_NAME} PRIVATE ${_windows_sdk_lib_dir})
+endif()
+if (WIN32 AND _msvc_lib_dir)
+    target_link_directories(${PROJECT_NAME} PRIVATE "${_msvc_lib_dir}")
+endif()
+target_link_libraries(${PROJECT_NAME} ws2_32)
+
+if (WIN32)
+    # INCLUDE is seeded above so Geode subprojects inherit the SDK/STL headers.
+endif()
+
+if (NOT DEFINED ENV{GEODE_SDK})
+    message(FATAL_ERROR "Unable to find Geode SDK! Please define GEODE_SDK environment variable to point to Geode")
+else()
+    message(STATUS "Found Geode: $ENV{GEODE_SDK}")
+endif()
+
+add_subdirectory($ENV{GEODE_SDK} ${CMAKE_CURRENT_BINARY_DIR}/geode)
+
+setup_geode_mod(${PROJECT_NAME})
