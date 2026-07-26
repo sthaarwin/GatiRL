@@ -18,20 +18,38 @@ class BridgeConfig:
 
 
 class GatiEnv(gym.Env):
-    """Gymnasium wrapper around the Gati bridge socket protocol."""
+    """Gymnasium wrapper around the Gati bridge socket protocol.
+
+    Observations are normalized:
+      - xPos: relative to start (offset from initial position)
+      - yPos: relative to ground level (~105)
+      - xVel: player speed multiplier (typically 8.4)
+      - yVel: vertical velocity (clipped)
+      - rotation: normalized to [-180, 180]
+      - isGrounded: 0/1
+      - isDead: 0/1
+      - hasWon: 0/1
+      - rays[0..4]: normalized to [0, 1] (0 = touching, 1 = far)
+    """
 
     metadata = {"render_modes": []}
     NUM_RAYS = 5
+    GROUND_Y = 105.0
+    PLAYER_SPEED_NORM = 8.4
+    MAX_Y_VEL = 20.0
 
     def __init__(self, host: str = "127.0.0.1", port: int = 6969, timeout_seconds: float = 15.0) -> None:
         super().__init__()
         self.config = BridgeConfig(host=host, port=port, timeout_seconds=timeout_seconds)
         self.action_space = spaces.Discrete(2)
-        obs_size = 8 + self.NUM_RAYS  # 8 original + 5 ray distances
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32)
+        obs_size = 8 + self.NUM_RAYS
+        self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(obs_size,), dtype=np.float32)
         self._socket: Optional[socket.socket] = None
         self._receive_buffer = ""
+        self._start_x: float = 0.0
         self._last_observation = np.zeros(obs_size, dtype=np.float32)
+        self._step_count: int = 0
+        self._episode_reward: float = 0.0
 
     def _connect(self) -> None:
         if self._socket is not None:
@@ -80,19 +98,36 @@ class GatiEnv(gym.Env):
             return {}
         return json.loads(raw_message)
 
-    def _state_from_payload(self, payload: dict[str, Any]) -> np.ndarray:
-        rays = payload.get("rays", [300.0] * self.NUM_RAYS)
+    def _normalize_obs(self, payload: dict[str, Any]) -> np.ndarray:
+        rays_raw = payload.get("rays", [300.0] * self.NUM_RAYS)
+
+        xPos = float(payload.get("xPos", 0.0))
+        yPos = float(payload.get("yPos", 0.0))
+        xVel = float(payload.get("xVel", 0.0))
+        yVel = float(payload.get("yVel", 0.0))
+        rotation = float(payload.get("rotation", 0.0))
+
+        x_norm = (xPos - self._start_x) / 3000.0
+        y_norm = (yPos - self.GROUND_Y) / 200.0
+        xvel_norm = xVel / self.PLAYER_SPEED_NORM if self.PLAYER_SPEED_NORM != 0 else 0.0
+        yvel_norm = np.clip(yVel / self.MAX_Y_VEL, -1.0, 1.0)
+
+        rot_rad = rotation % 360.0
+        if rot_rad > 180.0:
+            rot_rad -= 360.0
+        rot_norm = rot_rad / 180.0
+
         observation = np.array(
             [
-                float(payload.get("xPos", 0.0)),
-                float(payload.get("yPos", 0.0)),
-                float(payload.get("xVel", 0.0)),
-                float(payload.get("yVel", 0.0)),
-                float(payload.get("rotation", 0.0)),
+                np.clip(x_norm, -1.0, 1.0),
+                np.clip(y_norm, -1.0, 1.0),
+                np.clip(xvel_norm, -1.0, 1.0),
+                np.clip(yvel_norm, -1.0, 1.0),
+                np.clip(rot_norm, -1.0, 1.0),
                 1.0 if payload.get("isGrounded", False) else 0.0,
                 1.0 if payload.get("isDead", False) else 0.0,
                 1.0 if payload.get("hasWon", False) else 0.0,
-            ] + [float(r) for r in rays[: self.NUM_RAYS]],
+            ] + [np.clip(float(r) / 300.0, 0.0, 1.0) for r in rays_raw[: self.NUM_RAYS]],
             dtype=np.float32,
         )
         return observation
@@ -101,23 +136,36 @@ class GatiEnv(gym.Env):
         super().reset(seed=seed)
         self._send_message({"command": "reset"})
         payload = self._receive_message()
-        observation = self._state_from_payload(payload)
+        self._start_x = float(payload.get("xPos", 0.0))
+        self._step_count = 0
+        self._episode_reward = 0.0
+        observation = self._normalize_obs(payload)
         self._last_observation = observation
         return observation, {"bridge_state": payload}
 
     def step(self, action: int):
         self._send_message({"action": int(action)})
         payload = self._receive_message()
-        observation = self._state_from_payload(payload)
+        observation = self._normalize_obs(payload)
 
-        x_delta = float(observation[0] - self._last_observation[0])
         terminated = bool(observation[6] or observation[7])
-        reward = x_delta * 0.1 - (100.0 if observation[6] else 0.0) + (500.0 if observation[7] else 0.0)
-        if not terminated:
-            reward += 1.0
+        is_dead = bool(observation[6])
+        is_won = bool(observation[7])
+        self._step_count += 1
 
+        reward = 0.0
+
+        reward += 1.0
+
+        if is_dead:
+            reward -= 5.0
+
+        if is_won:
+            reward += 50.0
+
+        self._episode_reward += reward
         self._last_observation = observation
-        return observation, float(reward), terminated, False, {"bridge_state": payload}
+        return observation, float(reward), terminated, False, {"bridge_state": payload, "raw": payload}
 
     def close(self) -> None:
         if self._socket is None:

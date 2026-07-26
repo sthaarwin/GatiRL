@@ -94,25 +94,6 @@ public:
         m_pendingAction.reset();
     }
 
-    void step(const BridgeState& state) {
-        if (!m_running && !start()) {
-            return;
-        }
-
-        std::scoped_lock lock(m_mutex);
-        m_lastState = state;
-
-#ifdef _WIN32
-        acceptClientIfNeeded();
-        if (m_clientSocket == INVALID_SOCKET) {
-            return;
-        }
-
-        readClientCommands();
-        sendState(state);
-#endif
-    }
-
     void syncRead() {
         if (!m_running) {
             return;
@@ -152,6 +133,15 @@ public:
         auto action = m_pendingAction;
         m_pendingAction.reset();
         return action;
+    }
+
+    bool hasClient() const {
+        std::scoped_lock lock(m_mutex);
+#ifdef _WIN32
+        return m_clientSocket != INVALID_SOCKET;
+#else
+        return false;
+#endif
     }
 
 private:
